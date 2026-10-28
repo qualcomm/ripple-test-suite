@@ -21,6 +21,7 @@ add_test_app(vectorkernels
   sub.cpp
   sum.cpp
   swish.cpp
+  transpose_conv3d.cpp
   vabsdiff.cpp
   vmax.cpp
   vselect.cpp
