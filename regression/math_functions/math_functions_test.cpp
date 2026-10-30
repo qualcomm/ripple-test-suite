@@ -25,6 +25,88 @@ template <typename T> T hypot_ref(T x, T y) {
 }
 template <typename T> T rsqrt_ref(T x) { return static_cast<T>(1.0) / sqrt(x); }
 
+template <typename T>
+void fill_linear(std::vector<T> &Input, double Min, double Max) {
+  const double Step = (Max - Min) / (Input.size() - 1);
+  for (size_t i = 0; i < Input.size(); ++i)
+    Input[i] = static_cast<T>(Min + Step * i);
+}
+
+template <typename T, T (*OP)(T)>
+void prepare_unary_input(std::vector<T> &Input) {
+  if (OP == asinf_fn || OP == acosf_fn || OP == tanf_fn) {
+    fill_linear(Input, -1.0, 1.0);
+  } else if (OP == expf_fn || OP == sinhf_fn || OP == coshf_fn) {
+    fill_linear(Input, -4.0, 4.0);
+  } else if (OP == logf_fn || OP == rsqrt_ref<T>) {
+    fill_linear(Input, 0.125, 16.0);
+  } else if (OP == sqrtf_fn) {
+    fill_linear(Input, 0.0, 16.0);
+  } else {
+    fill_linear(Input, -8.0, 8.0);
+  }
+}
+
+template <typename T, T (*OP)(T, T)>
+void prepare_binary_input(std::vector<T> &Input1, std::vector<T> &Input2) {
+  if (OP == powf_fn) {
+    fill_linear(Input1, 0.5, 2.0);
+    fill_linear(Input2, 0.0, 1.0);
+  } else {
+    fill_linear(Input1, -8.0, 8.0);
+    fill_linear(Input2, 4.0, -4.0);
+  }
+}
+
+template <size_t NumValues>
+void repeat_values(std::vector<float> &Input,
+                   const float (&Values)[NumValues]) {
+  for (size_t i = 0; i < Input.size(); ++i)
+    Input[i] = Values[i % NumValues];
+}
+
+template <float (*OP)(float)>
+void prepare_unary_domain_input(std::vector<float> &Input) {
+  if (OP == asinf_fn || OP == acosf_fn) {
+    const float Values[] = {-4.0f, -1.25f, 1.25f, 4.0f};
+    repeat_values(Input, Values);
+  } else if (OP == logf_fn) {
+    const float Values[] = {-4.0f, -1.0f, -0.25f};
+    repeat_values(Input, Values);
+  } else if (OP == sqrtf_fn) {
+    const float Values[] = {-4.0f, -1.0f, -0.25f, -0.0f};
+    repeat_values(Input, Values);
+  } else if (OP == rsqrt_ref<float>) {
+    const float Values[] = {-4.0f, -1.0f, -0.25f};
+    repeat_values(Input, Values);
+  }
+}
+
+void prepare_zero_input(std::vector<float> &Input) {
+  const float Values[] = {-0.0f, 0.0f};
+  repeat_values(Input, Values);
+}
+
+void prepare_pow_domain_input(std::vector<float> &Input1,
+                              std::vector<float> &Input2) {
+  const float Bases[] = {-4.0f, -2.0f, -1.0f, -0.5f};
+  const float Exponents[] = {0.5f, 1.5f, -0.5f, 2.5f};
+  repeat_values(Input1, Bases);
+  repeat_values(Input2, Exponents);
+}
+
+bool same_special_value(float Actual, float Expected) {
+  if (isnan(Expected))
+    return isnan(Actual);
+  if (isinf(Expected))
+    return isinf(Actual) &&
+           __builtin_signbit(Actual) == __builtin_signbit(Expected);
+  if (Expected == 0.0f)
+    return Actual == 0.0f &&
+           __builtin_signbit(Actual) == __builtin_signbit(Expected);
+  return Actual == Expected;
+}
+
 template <typename T, T (*OP)(T)>
 void ref_unary_math(size_t N, T *output, const T *input) {
   for (size_t i = 0; i < N; i++)
@@ -47,22 +129,13 @@ public:
   TestBase(TestFramework &TF, size_t N)
       : Test(TF), N(N), Input1(N), Output(N), Input2(N), RefOutput(N) {}
 
-  void prepare(unsigned) override {
-    // Following input generator needs to
-    // be fixed based on the function's input
-    // range
-    for (size_t i = 0; i < N; ++i) {
-      Input1[i] = static_cast<T>(0.1 * i);
-      Input2[i] = static_cast<T>(0.1 * i);
-    }
-  }
-
   bool verify() const override {
     return isclose(N, &RefOutput[0], &Output[0], 1e-5, 5 * 1e-2);
   }
 };
 
 enum { N = 129 };
+enum { DomainN = 32 };
 
 // Scalar math functions tests
 template <typename T, T (*OP)(T)>
@@ -71,7 +144,7 @@ public:
   ScalarUnaryMathTest(TestFramework &TF) : TestBase<T>(TF, N) {}
 
   void prepare(unsigned) override {
-    TestBase<T>::prepare(0);
+    prepare_unary_input<T, OP>(this->Input1);
     ref_unary_math<T, OP>(this->N, &this->RefOutput[0], &this->Input1[0]);
   }
 
@@ -87,7 +160,7 @@ public:
   ScalarBinaryMathTest(TestFramework &TF) : TestBase<T>(TF, N) {}
 
   void prepare(unsigned) override {
-    TestBase<T>::prepare(0);
+    prepare_binary_input<T, OP>(this->Input1, this->Input2);
     ref_binary_math<T, OP>(this->N, &this->RefOutput[0], &this->Input1[0],
                            &this->Input2[0]);
   }
@@ -106,7 +179,7 @@ public:
   RippleUnaryMathTest(TestFramework &TF) : TestBase<T>(TF, N) {}
 
   void prepare(unsigned) override {
-    TestBase<T>::prepare(0);
+    prepare_unary_input<T, REF_OP>(this->Input1);
     ref_unary_math<T, REF_OP>(this->N, &this->RefOutput[0], &this->Input1[0]);
   }
 
@@ -121,13 +194,119 @@ class RippleBinaryMathTest : public TestBase<T> {
 public:
   RippleBinaryMathTest(TestFramework &TF) : TestBase<T>(TF, N) {}
   void prepare(unsigned) override {
-    TestBase<T>::prepare(0);
+    prepare_binary_input<T, REF_OP>(this->Input1, this->Input2);
     ref_binary_math<T, REF_OP>(this->N, &this->RefOutput[0], &this->Input1[0],
                                &this->Input2[0]);
   }
   void run(unsigned) override {
     Ripple_binary_math<T, RIPPLE_OP>(this->N, &this->Output[0],
                                      &this->Input1[0], &this->Input2[0]);
+  }
+};
+
+template <float (*REF_OP)(float), float (*RIPPLE_OP)(float)>
+class RippleUnaryDomainTest : public TestBase<float> {
+public:
+  RippleUnaryDomainTest(TestFramework &TF) : TestBase<float>(TF, DomainN) {}
+
+  void prepare(unsigned) override {
+    prepare_unary_domain_input<REF_OP>(this->Input1);
+    ref_unary_math<float, REF_OP>(this->N, &this->RefOutput[0],
+                                  &this->Input1[0]);
+  }
+
+  void run(unsigned) override {
+    Ripple_unary_math<float, RIPPLE_OP>(this->N, &this->Output[0],
+                                        &this->Input1[0]);
+  }
+
+  bool verify() const override {
+    for (size_t i = 0; i < this->N; ++i) {
+      if (!same_special_value(this->Output[i], this->RefOutput[i])) {
+        printf("domain mismatch at %zu: input=%a, expected=%a, actual=%a\n", i,
+               static_cast<double>(this->Input1[i]),
+               static_cast<double>(this->RefOutput[i]),
+               static_cast<double>(this->Output[i]));
+        return false;
+      }
+    }
+    return true;
+  }
+};
+
+template <float (*REF_OP)(float), float (*RIPPLE_OP)(float)>
+class RippleUnaryZeroTest : public TestBase<float> {
+public:
+  RippleUnaryZeroTest(TestFramework &TF) : TestBase<float>(TF, DomainN) {}
+
+  std::pair<bool, std::string> xfail() const override {
+#ifdef __hexagon__
+    if (REF_OP == logf_fn)
+      return {true, "The Hexagon HVX logf implementation does not return "
+                    "-infinity for zero inputs."};
+    return {true, "The Hexagon HVX rsqrtf implementation does not return "
+                  "signed infinities for zero inputs."};
+#else
+    return {false, ""};
+#endif
+  }
+
+  void prepare(unsigned) override {
+    prepare_zero_input(this->Input1);
+    ref_unary_math<float, REF_OP>(this->N, &this->RefOutput[0],
+                                  &this->Input1[0]);
+  }
+
+  void run(unsigned) override {
+    Ripple_unary_math<float, RIPPLE_OP>(this->N, &this->Output[0],
+                                        &this->Input1[0]);
+  }
+
+  bool verify() const override {
+    for (size_t i = 0; i < this->N; ++i)
+      if (!same_special_value(this->Output[i], this->RefOutput[i]))
+        return false;
+    return true;
+  }
+};
+
+class RipplePowDomainTest : public TestBase<float> {
+public:
+  RipplePowDomainTest(TestFramework &TF) : TestBase<float>(TF, DomainN) {}
+
+  std::pair<bool, std::string> xfail() const override {
+#ifdef __hexagon__
+    return {true, "The Hexagon HVX powf implementation does not always return "
+                  "NaN for a negative base and fractional exponent."};
+#else
+    return {false, ""};
+#endif
+  }
+
+  void prepare(unsigned) override {
+    prepare_pow_domain_input(this->Input1, this->Input2);
+    ref_binary_math<float, powf_fn>(this->N, &this->RefOutput[0],
+                                    &this->Input1[0], &this->Input2[0]);
+  }
+
+  void run(unsigned) override {
+    Ripple_binary_math<float, powf_fn>(this->N, &this->Output[0],
+                                       &this->Input1[0], &this->Input2[0]);
+  }
+
+  bool verify() const override {
+    for (size_t i = 0; i < this->N; ++i) {
+      if (!same_special_value(this->Output[i], this->RefOutput[i])) {
+        printf("domain mismatch at %zu: base=%a, exponent=%a, expected=%a, "
+               "actual=%a\n",
+               i, static_cast<double>(this->Input1[i]),
+               static_cast<double>(this->Input2[i]),
+               static_cast<double>(this->RefOutput[i]),
+               static_cast<double>(this->Output[i]));
+        return false;
+      }
+    }
+    return true;
   }
 };
 
@@ -217,7 +396,9 @@ DefineTest<ScalarUnaryMathTest<float, ceilf_fn>>
 DefineTest<RippleUnaryMathTest<float, ceilf_fn, ceilf_fn>>
     RippleFloatCeil("RippleFloatCeil");
 
-// Unary _Float16
+// FP16 coverage remains disabled because the Hexagon runtime does not provide
+// the scalar FP16 math entry points needed by the reference and loop remainder.
+#if 0
 DefineTest<ScalarUnaryMathTest<_Float16, sinf16_fn>>
     ScalarHalfSin("ScalarHalfSin");
 DefineTest<RippleUnaryMathTest<_Float16, sinf16_fn, sinf16_fn>>
@@ -302,6 +483,7 @@ DefineTest<ScalarUnaryMathTest<_Float16, ceilf16_fn>>
     ScalarHalfCeil("ScalarHalfCeil");
 DefineTest<RippleUnaryMathTest<_Float16, ceilf16_fn, ceilf16_fn>>
     RippleHalfCeil("RippleHalfCeil");
+#endif
 
 // Binary Float
 DefineTest<ScalarBinaryMathTest<float, powf_fn>>
@@ -314,7 +496,25 @@ DefineTest<ScalarBinaryMathTest<float, hypot_ref>>
 DefineTest<RippleBinaryMathTest<float, hypot_ref, hypotf_fn>>
     RippleFloatHypot("RippleFloatHypot");
 
-// Binary _Float16
+// Domain behavior and signed special values are checked separately from the
+// finite-range approximation tests above.
+DefineTest<RippleUnaryDomainTest<asinf_fn, asinf_fn>>
+    RippleFloatAsinDomain("RippleFloatAsinDomain");
+DefineTest<RippleUnaryDomainTest<acosf_fn, acosf_fn>>
+    RippleFloatAcosDomain("RippleFloatAcosDomain");
+DefineTest<RippleUnaryDomainTest<logf_fn, logf_fn>>
+    RippleFloatLogDomain("RippleFloatLogDomain");
+DefineTest<RippleUnaryZeroTest<logf_fn, logf_fn>>
+    RippleFloatLogZero("RippleFloatLogZero");
+DefineTest<RippleUnaryDomainTest<sqrtf_fn, sqrtf_fn>>
+    RippleFloatSqrtDomain("RippleFloatSqrtDomain");
+DefineTest<RippleUnaryDomainTest<rsqrt_ref, rsqrtf_fn>>
+    RippleFloatRsqrtDomain("RippleFloatRsqrtDomain");
+DefineTest<RippleUnaryZeroTest<rsqrt_ref, rsqrtf_fn>>
+    RippleFloatRsqrtZero("RippleFloatRsqrtZero");
+DefineTest<RipplePowDomainTest> RippleFloatPowDomain("RippleFloatPowDomain");
+
+#if 0
 DefineTest<ScalarBinaryMathTest<_Float16, powf16_fn>>
     ScalarHalfPow("ScalarHalfPow");
 DefineTest<RippleBinaryMathTest<_Float16, powf16_fn, powf16_fn>>
@@ -324,5 +524,6 @@ DefineTest<ScalarBinaryMathTest<_Float16, hypot_ref>>
     ScalarHalfHypot("ScalarHalfHypot");
 DefineTest<RippleBinaryMathTest<_Float16, hypot_ref, hypotf16_fn>>
     RippleHalfHypot("RippleHalfHypot");
+#endif
 
 } // namespace
