@@ -8,9 +8,12 @@
 //===----------------------------------------------------------------------===//
 
 #include <ripple-test-suite/ripple-test-suite.h>
+#include <ripple-test-suite/floating-point-limits.h>
 
 #include <ripple.h>
 #include <ripple_math.h>
+
+#include <limits>
 
 namespace {
 
@@ -24,7 +27,7 @@ namespace {
  */
 template <typename T>
 void add_ripple(size_t N, const T *a, const T *b, T *apb) {
-  auto BS = ripple_set_block_shape(0, 128 / sizeof(T));
+  auto BS = ripple_set_block_shape(0, RIPPLE_BLOCK_SIZE(T));
   ripple_parallel(BS, 0);
   for (size_t i = 0; i < N; i++)
     apb[i] = a[i] + b[i];
@@ -41,7 +44,7 @@ void add_ripple(size_t N, const T *a, const T *b, T *apb) {
  */
 template <typename T>
 void sub_ripple(size_t N, const T *a, const T *b, T *asb) {
-  auto BS = ripple_set_block_shape(0, 128 / sizeof(T));
+  auto BS = ripple_set_block_shape(0, RIPPLE_BLOCK_SIZE(T));
   ripple_parallel(BS, 0);
   for (size_t i = 0; i < N; i++)
     asb[i] = a[i] - b[i];
@@ -58,7 +61,7 @@ void sub_ripple(size_t N, const T *a, const T *b, T *asb) {
  */
 template <typename T>
 void mult_ripple(size_t N, const T *a, const T *b, T *atb) {
-  auto BS = ripple_set_block_shape(0, 128 / sizeof(T));
+  auto BS = ripple_set_block_shape(0, RIPPLE_BLOCK_SIZE(T));
   ripple_parallel(BS, 0);
   for (size_t i = 0; i < N; i++)
     atb[i] = a[i] * b[i];
@@ -78,6 +81,15 @@ public:
     for (int i = 0; i < N; i++) {
       X[i] = static_cast<T>(42 * (randn() - 0.5));
       Y[i] = static_cast<T>(42 * (randn() - 0.5));
+      if (O == Op::ADD && __is_same(T, float)) {
+        // Test near cancellation separately in AddCancellationTest. Keep
+        // both signs here, with sums bounded away from cancellation.
+        const double A = static_cast<double>(X[i]);
+        const double B = static_cast<double>(Y[i]);
+        if (__builtin_fabs(A + B) <
+            0.25 * (__builtin_fabs(A) + __builtin_fabs(B)))
+          Y[i] = -Y[i];
+      }
       if (O == Op::ADD)
         XopYRef[i] = X[i] + Y[i];
       if (O == Op::SUB)
@@ -85,6 +97,20 @@ public:
       if (O == Op::MULT)
         XopYRef[i] = X[i] * Y[i];
     }
+  }
+
+  std::pair<bool, std::string> xfail() const override {
+#if defined(__hexagon__) && defined(__HVX__) && defined(__HVX_IEEE_FP__) && \
+    __HEXAGON_ARCH__ == 81
+    bool UsesFP32 = __is_same(T, float);
+#if __has_bf16__
+    UsesFP32 |= __is_same(T, __bf16);
+#endif
+    if (UsesFP32)
+      return {true, "Hexagon v81 IEEE-mode FP32/BF16 vector arithmetic "
+                    "produces incorrect results."};
+#endif
+    return {false, ""};
   }
 
   void run(unsigned) override {
@@ -98,6 +124,109 @@ public:
 
   bool verify() const override {
     return isclose(N, &(XopY[0]), &(XopYRef[0]), pow(0.1, SigDigits));
+  }
+};
+
+class AddCancellationTest : public Test {
+  static constexpr size_t N = 129;
+  std::vector<float> X, Y, Output, Expected;
+
+public:
+  AddCancellationTest(TestFramework &TF)
+      : Test(TF), X(N), Y(N), Output(N), Expected(N) {
+    // 1 - 2^-24 is the FP32 value immediately below 1. Both stored operands
+    // and their small residual are exactly representable in FP32. This is a
+    // single addition, so the extra internal precision of v79+ QFloat in IEEE
+    // mode should preserve the residual even without intermediate IEEE
+    // rounding. Legacy QFloat addition doubles it when these operands cancel.
+    const float Step = 1.0f / (1u << 24);
+    for (size_t i = 0; i < N; ++i) {
+      const float Scale = static_cast<float>(1u << (i % 5));
+      const float Sign = i % 2 ? -1.0f : 1.0f;
+      X[i] = Sign * Scale;
+      Y[i] = -Sign * Scale * (1.0f - Step);
+      Expected[i] = Sign * Scale * Step;
+      if (i % 4 >= 2)
+        std::swap(X[i], Y[i]);
+    }
+  }
+
+  std::pair<bool, std::string> xfail() const override {
+#if defined(__hexagon__) && defined(__HVX__) && defined(__HVX_IEEE_FP__) && \
+    __HEXAGON_ARCH__ == 81
+    return {true, "Hexagon v81 IEEE-mode vector addition produces incorrect "
+                  "results near cancellation."};
+#endif
+#if defined(__hexagon__) && defined(__HVX__) && !defined(__HVX_IEEE_FP__) && \
+    (__HEXAGON_ARCH__ == 68 || __HEXAGON_ARCH__ == 69 || \
+     __HEXAGON_ARCH__ == 73 || __HEXAGON_ARCH__ == 75)
+    return {true, "Legacy Hexagon QFloat FP32 addition loses accuracy near "
+                  "cancellation."};
+#endif
+    return {false, ""};
+  }
+
+  void prepare(unsigned) override {
+    std::fill(Output.begin(), Output.end(), 42.0f);
+  }
+
+  void run(unsigned) override {
+    add_ripple(N, &X[0], &Y[0], &Output[0]);
+  }
+
+  bool verify() const override {
+    return isclose(N, &Output[0], &Expected[0], 1e-4);
+  }
+};
+
+template <typename T> class AddOverflowTest : public Test {
+  static constexpr size_t N = 129;
+  std::vector<T> X, Y, Output, Expected;
+
+public:
+  AddOverflowTest(TestFramework &TF)
+      : Test(TF), X(N), Y(N), Output(N), Expected(N) {
+    for (size_t i = 0; i < N; ++i) {
+      const T Max = FloatLimits<T>::max();
+      const T Inf = FloatLimits<T>::infinity();
+      X[i] = Y[i] = i % 2 ? -Max : Max;
+      Expected[i] = i % 2 ? -Inf : Inf;
+    }
+  }
+
+  std::pair<bool, std::string> xfail() const override {
+#if defined(__hexagon__) && defined(__HVX__) && defined(__HVX_IEEE_FP__) && \
+    __HEXAGON_ARCH__ == 81
+    if (!__is_same(T, double))
+      return {true, "Hexagon v81 IEEE-mode vector addition does not return "
+                    "signed infinity on overflow."};
+#endif
+#if defined(__hexagon__) && defined(__HVX__) && !defined(__HVX_IEEE_FP__) && \
+    (__HEXAGON_ARCH__ == 68 || __HEXAGON_ARCH__ == 69 || \
+     __HEXAGON_ARCH__ == 73 || __HEXAGON_ARCH__ == 75)
+    if (__is_same(T, float))
+      return {true, "Legacy Hexagon QFloat addition returns NaN instead of "
+                    "signed infinity on FP32 overflow."};
+#if __has_Float16__
+    if (__is_same(T, _Float16))
+      return {true, "Legacy Hexagon QFloat addition returns NaN instead of "
+                    "signed infinity on FP16 overflow."};
+#endif
+#endif
+    return {false, ""};
+  }
+
+  void prepare(unsigned) override {
+    std::fill(Output.begin(), Output.end(), T(42));
+  }
+
+  void run(unsigned) override {
+    add_ripple(N, &X[0], &Y[0], &Output[0]);
+  }
+
+  bool verify() const override {
+    // isclose checks infinity classification and sign before finite tolerance.
+    return isclose(N, &Output[0], &Expected[0]);
   }
 };
 
@@ -115,6 +244,18 @@ DefineTest<OpTest<double, Op::ADD, 6>> TF64Add("OpTest<+,f64>");
 DefineTest<OpTest<double, Op::SUB, 6>> TF64Sub("OpTest<-,f64>");
 DefineTest<OpTest<double, Op::MULT, 6>> TF64Mult("OpTest<*,f64>");
 
+DefineTest<AddCancellationTest> TF32AddCancellation("OpTest<+,f32,cancellation>");
+DefineTest<AddOverflowTest<float>> TF32AddOverflow("OpTest<+,f32,overflow>");
+DefineTest<AddOverflowTest<double>> TF64AddOverflow("OpTest<+,f64,overflow>");
+
+#if __has_Float16__
+DefineTest<AddOverflowTest<_Float16>> TF16AddOverflow("OpTest<+,f16,overflow>");
+#endif
+
+#if __has_bf16__
+DefineTest<AddOverflowTest<__bf16>> TBF16AddOverflow("OpTest<+,bf16,overflow>");
+#endif
+
 #ifdef __hexagon__
 // TODO: Fix this for x86.
 #if __has_bf16__
@@ -124,6 +265,6 @@ DefineTest<OpTest<__bf16, Op::MULT, 3>> TBF16Mult("OpTest<*,bf16>");
 #endif
 #endif
 
-// TODO: Test special floating point numbers. nan, inf, subnormal, etc.
+// TODO: Test NaN/infinity operands, signed zeros, and subnormals.
 
 } // namespace

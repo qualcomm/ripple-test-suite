@@ -4,9 +4,33 @@ Every test app supports the following options:
 
 ```
 -o <filename>   Redirect the output to the specified file instead of the standard output.
--r <number>     Repeat each test <number> times and report the last result. By default,
+--repeat <n>   Repeat each test <n> times and report the last result. By default,
                 tests are repeated 5 times.
 ```
+
+`check` builds the test executables and runs them through CTest. Configure
+`RIPPLE_TEST_SUITE_TEST_JOBS` to limit concurrent executables and
+`RIPPLE_TEST_SUITE_TEST_REPEAT` to set iterations per test. For an existing
+configured build:
+
+```console
+$ cmake -S . -B build -DRIPPLE_TEST_SUITE_TEST_JOBS=4 -DRIPPLE_TEST_SUITE_TEST_REPEAT=1
+$ cmake --build build --target check
+```
+
+The CMake/CTest defaults are four concurrent executables and one iteration,
+matching Hexagon CI. For native timing runs, configure
+`RIPPLE_TEST_SUITE_TEST_JOBS=1` and `RIPPLE_TEST_SUITE_TEST_REPEAT=5` to measure
+one executable at a time with repeated iterations.
+Every case still runs its preparation and verification;
+XFAIL, XPASS, and crash handling are unchanged. CTest retains output per
+executable under `build/Testing/Temporary/LastTest.log`.
+
+Individual `test-<app>` targets remain available. After building, CTest can
+also select executables with `ctest -R <pattern>` and override concurrency
+with `ctest -j <jobs>` from the build directory. The repeat-count setting
+applies to CMake/CTest runs; direct executable invocations still default to
+five iterations and accept `--repeat`.
 
 ## Note on switching between cmake configurations
 
@@ -33,6 +57,10 @@ $ cmake --build . -t check
 ```
 
 Using clang builtins (`-rtlib=compiler-rt` and  `-lunwind`) is needed for bfloat16 tests.
+
+Native bf16 math tests require a Ripple compiler with bf16 builtin dispatch and
+math intrinsic lookup support. They need no additional x86 CPU flag; the
+AArch64 configuration below uses `-march=armv9.2-a`.
 
 ### AArch64 (cross-compiling, using clang)
 
@@ -72,6 +100,68 @@ $ cmake --build . -t check
 ```
 
 In the above build script, we use hexagon libstdc++ to build a Hexagon standalone binary (without QuRT).
+
+Use Hexagon v81 for combined fp16/bf16 coverage. The Ripple compiler enables
+`_Float16` from v68 and `__bf16` from v81; its HVX bf16 vector types also require
+v81 and 128-byte vectors. CI builds and runs separate v68, v69, v73, v75, v79,
+and v81 configurations with 128-byte HVX vectors, each with and without
+`-mhvx-ieee-fp`. Pull requests and pushes to main use v68, v79, and v81 as
+representatives of legacy QFloat, v79+ QFloat, and BF16/v81 IEEE behavior.
+Manual runs and the weekly Sunday 12:00 UTC run cover all six versions.
+Scheduled runs have their own concurrency group so pushes do not cancel them.
+The flag selects hardware IEEE operations on the legacy
+QFloat targets and IEEE-compatible QFloat mode from v79. v68 covers the first
+fp16 target, and v75 covers hardware before the v79 transition away from IEEE HVX
+operations. The legacy log-zero expected failures apply only without the
+IEEE flag on v68/v69/v73/v75. Reproduced v81 IEEE-mode numerical failures
+in the regressions, fully connected NN mini-app, and vector kernels have
+scoped XFAILs; the affected tests still run, and crashes and unexpected passes
+fail the check.
+The `__has_bf16__` guards exclude bf16 tests before v81; fp16 tests remain
+enabled. Both compiler-rt and the test suite use the selected architecture, and
+the simulator is passed that version explicitly. A single Hexagon job builds
+the compiler once, then builds and installs compiler-rt for one version and
+immediately runs that version's tests in both FP modes before moving to the next
+version. Its thread libraries use version-specific instructions and SDK headers,
+so each version has its own runtime install. Both FP-mode test builds select
+that install's headers with `-resource-dir`. A runtime configure, build, or
+install failure skips only that version's two FP modes. The job continues with
+the other versions and modes, with separate log groups, error annotations, and
+a results table in the job summary. Any runtime or test failure still fails
+the job.
+
+v67 covers a target without `_Float16`. With the LLVM FP16 type and HVX math
+header guards, the v67 math sources pass compiler-only syntax checks. Runtime
+coverage is deferred because the installed Hexagon SDK 6.7.0.0 (Hexagon Tools
+21.0.04) supports only v68 and later. v67 therefore remains outside the CI
+execution matrix; its numerical behavior has not been tested.
+
+v83 is excluded from HVX coverage because Hexagon SDK 6.7.0.0 (Hexagon Tools
+21.0.04) exposes no v83 simulator variant with an HVX coprocessor: all ten
+listed models are marked `COPROC N`.
+Native v83 probes built with the SDK compiler fail HVX acquisition on all ten
+listed models. The Ripple compiler on this release branch also rejects `-mv83`.
+
+HVX is an
+[optional coprocessor](https://docs.qualcomm.com/doc/80-N2040-61/topic/introduction.html)
+with its own vector register file and compute resources; its availability
+depends on the particular core implementation. Qualcomm publishes a
+[v83 HVX reference manual](https://docs.qualcomm.com/doc/80-N3040-23/topic/index_80-n2040-70_v83_hvx_prm.html).
+The coverage limitation applies to this SDK's simulator models; upstream LLVM
+main defines v83 CPU and HVX support.
+
+The same SDK provides v85 models with HVX/VTCM: `v85qa_1`, `v85dm_2`,
+`v85na_1`, and `v85nb_1`. Native SDK probes pass HVX acquisition in 128-byte
+mode and VTCM setup on all four. v85 coverage is deferred because this Ripple
+LLVM 23 release branch lacks v85 target support; it rejects both `-mv85` and
+`-mcpu=hexagonv85`. The full math suite has not been tested on v85.
+
+Upstream LLVM main (LLVM 24 development) already defines the
+[`hexagonv85` CPU and `hvxv85` feature](https://github.com/llvm/llvm-project/blob/main/llvm/lib/Target/Hexagon/Hexagon.td),
+with [Clang target support](https://github.com/llvm/llvm-project/blob/main/clang/lib/Basic/Targets/Hexagon.cpp).
+These definitions are absent from upstream `release/23.x` and the Ripple
+release branch used here. Enabling v85 CI requires bringing that compiler
+support into this branch before validating the Ripple test suite on v85.
 
 ### Hexagon with Community Hexagon SDK (on device)
 

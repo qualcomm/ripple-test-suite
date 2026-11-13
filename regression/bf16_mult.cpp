@@ -9,7 +9,7 @@
 
 #include <ripple.h>
 
-#if __has_bf16__
+#if __has_bf16__ || __has_Float16__
 #include <cmath>
 #include <stddef.h>
 #include <stdint.h>
@@ -68,6 +68,7 @@ class FlatMultTest : public Test {
     }
   }
 
+#if __has_bf16__
   bool verify_for(const __bf16 *out, const __bf16 *out_ref) const {
     for (int i = 0; i < N; ++i) {
       const float actual = static_cast<float>(out[i]);
@@ -77,9 +78,12 @@ class FlatMultTest : public Test {
     }
     return true;
   }
+#endif
+#if __has_Float16__
   bool verify_for(const _Float16 *out, const _Float16 *out_ref) const {
     return isclose(N, out, out_ref, pow(0.1, SigDigits));
   }
+#endif
 
 public:
   FlatMultTest(TestFramework &TestFramework) : Test(TestFramework) {
@@ -88,6 +92,16 @@ public:
     flat_mul_reference(reinterpret_cast<Dtype *>(YRef),
                        reinterpret_cast<Dtype *>(A),
                        reinterpret_cast<Dtype *>(B), N);
+  }
+
+  std::pair<bool, std::string> xfail() const override {
+#if defined(__hexagon__) && defined(__HVX__) && defined(__HVX_IEEE_FP__) && \
+    __HEXAGON_ARCH__ == 81
+    if (KT == Ripple)
+      return {true, "Hexagon v81 IEEE-mode FP16/BF16 vector multiplication "
+                    "produces incorrect results."};
+#endif
+    return {false, ""};
   }
 
   void run(unsigned) override {
@@ -107,11 +121,15 @@ public:
   }
 };
 
+#if __has_bf16__
 DefineTest<FlatMultTest<Reference, __bf16, 1>> Bf16RefMul("Multiply<ref,bf16>");
 DefineTest<FlatMultTest<Ripple, __bf16, 1>>
     Bf16RippleMul("Multiply<ripple,bf16>");
+#endif
+#if __has_Float16__
 DefineTest<FlatMultTest<Reference, _Float16, 3>>
     FP16RefMul("Multiply<ref,fp16>");
 DefineTest<FlatMultTest<Ripple, _Float16, 3>>
     FP16RippleMul("Multiply<ripple,fp16>");
-#endif // __has_bf16__
+#endif
+#endif // __has_bf16__ || __has_Float16__
