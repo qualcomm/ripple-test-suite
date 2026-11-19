@@ -270,12 +270,18 @@ public:
     (__HEXAGON_ARCH__ == 68 || __HEXAGON_ARCH__ == 69 || \
      __HEXAGON_ARCH__ == 73 || __HEXAGON_ARCH__ == 75)
     if (__is_same(T, float))
-      return {true, "Legacy Hexagon QFloat addition returns NaN instead of "
-                    "signed infinity on FP32 reduction overflow."};
+      return {true, "Expected legacy QFloat saturation and conversion yield "
+                    "an IEEE FP32 NaN encoding on reduction overflow. See v68 "
+                    "HVX PRM Sec. 5.6, vadd, pp. 256-257, and conversion, "
+                    "p. 268. "
+                    "https://docs.qualcomm.com/bundle/publicresource/80-N2040-47.pdf"};
 #if __has_Float16__
     if (__is_same(T, _Float16))
-      return {true, "Legacy Hexagon QFloat addition returns NaN instead of "
-                    "signed infinity on FP16 reduction overflow."};
+      return {true, "Expected legacy QFloat saturation and conversion yield "
+                    "an IEEE FP16 NaN encoding on reduction overflow. See v68 "
+                    "HVX PRM Sec. 5.6, vadd, pp. 254-255, and conversion, "
+                    "p. 268. "
+                    "https://docs.qualcomm.com/bundle/publicresource/80-N2040-47.pdf"};
 #endif
 #endif
     return {false, ""};

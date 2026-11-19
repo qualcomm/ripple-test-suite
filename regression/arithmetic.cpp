@@ -160,8 +160,10 @@ public:
 #if defined(__hexagon__) && defined(__HVX__) && !defined(__HVX_IEEE_FP__) && \
     (__HEXAGON_ARCH__ == 68 || __HEXAGON_ARCH__ == 69 || \
      __HEXAGON_ARCH__ == 73 || __HEXAGON_ARCH__ == 75)
-    return {true, "Legacy Hexagon QFloat FP32 addition loses accuracy near "
-                  "cancellation."};
+    return {true, "Expected legacy QFloat FP32 Von Neumann rounding doubles "
+                  "the cancellation residual. See v68 HVX PRM Sec. 5.6 and "
+                  "vadd, pp. 256-257. "
+                  "https://docs.qualcomm.com/bundle/publicresource/80-N2040-47.pdf"};
 #endif
     return {false, ""};
   }
@@ -205,12 +207,16 @@ public:
     (__HEXAGON_ARCH__ == 68 || __HEXAGON_ARCH__ == 69 || \
      __HEXAGON_ARCH__ == 73 || __HEXAGON_ARCH__ == 75)
     if (__is_same(T, float))
-      return {true, "Legacy Hexagon QFloat addition returns NaN instead of "
-                    "signed infinity on FP32 overflow."};
+      return {true, "Expected legacy QFloat saturation and conversion yield "
+                    "an IEEE FP32 NaN encoding on overflow. See v68 HVX PRM "
+                    "Sec. 5.6, vadd, pp. 256-257, and conversion, p. 268. "
+                    "https://docs.qualcomm.com/bundle/publicresource/80-N2040-47.pdf"};
 #if __has_Float16__
     if (__is_same(T, _Float16))
-      return {true, "Legacy Hexagon QFloat addition returns NaN instead of "
-                    "signed infinity on FP16 overflow."};
+      return {true, "Expected legacy QFloat saturation and conversion yield "
+                    "an IEEE FP16 NaN encoding on overflow. See v68 HVX PRM "
+                    "Sec. 5.6, vadd, pp. 254-255, and conversion, p. 268. "
+                    "https://docs.qualcomm.com/bundle/publicresource/80-N2040-47.pdf"};
 #endif
 #endif
     return {false, ""};
