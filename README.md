@@ -6,6 +6,10 @@ Every test app supports the following options:
 -o <filename>   Redirect the output to the specified file instead of the standard output.
 --repeat <n>   Repeat each test <n> times and report the last result. By default,
                 tests are repeated 5 times.
+--seed <n>     Offset the per-test input seeds of tests with their own
+                deterministic generators (currently the FFT tests), e.g. to
+                sweep inputs without rebuilding. Defaults to 0. Tests that use
+                rand() are unaffected.
 ```
 
 `check` builds the test executables and runs them through CTest. Configure
@@ -14,11 +18,11 @@ Every test app supports the following options:
 configured build:
 
 ```console
-$ cmake -S . -B build -DRIPPLE_TEST_SUITE_TEST_JOBS=4 -DRIPPLE_TEST_SUITE_TEST_REPEAT=1
+$ cmake -S . -B build -DRIPPLE_TEST_SUITE_TEST_JOBS=16 -DRIPPLE_TEST_SUITE_TEST_REPEAT=1
 $ cmake --build build --target check
 ```
 
-The CMake/CTest defaults are four concurrent executables and one iteration,
+The CMake/CTest defaults are 16 concurrent executables and one iteration,
 matching Hexagon CI. For native timing runs, configure
 `RIPPLE_TEST_SUITE_TEST_JOBS=1` and `RIPPLE_TEST_SUITE_TEST_REPEAT=5` to measure
 one executable at a time with repeated iterations.
@@ -31,6 +35,59 @@ also select executables with `ctest -R <pattern>` and override concurrency
 with `ctest -j <jobs>` from the build directory. The repeat-count setting
 applies to CMake/CTest runs; direct executable invocations still default to
 five iterations and accept `--repeat`.
+
+## Regression groups
+
+Regressions run as separate `regressions_arithmetic`, `regressions_reductions`,
+and `regressions_math` executables. Builds with HVX runtime coverage also add
+`regressions_scatter_gather` and `regressions_narrow_shift`. The reductions
+group includes top-k tests on X86 and AArch64; Hexagon still excludes them.
+CTest can run these groups in parallel as separate simulator processes.
+
+`cmake --build build --target regressions` builds all enabled groups.
+`cmake --build build --target test-regressions` builds and runs them with the
+configured test job limit. Individual `test-regressions_<group>` targets run
+one group. After building, select just these regression groups with:
+
+```console
+$ ctest --test-dir build -L regressions -j 16 --output-on-failure
+```
+
+The former single `regressions` executable is replaced by these groups.
+
+## Vector kernel groups
+
+Vector kernels run as six separate executables: `vectorkernels_fft`,
+`vectorkernels_convolution`, `vectorkernels_filters`, `vectorkernels_linalg`,
+`vectorkernels_activations`, and `vectorkernels_primitives`. CTest can run
+these groups in parallel, including as separate Hexagon simulator processes.
+
+`cmake --build build --target vectorkernels` builds all six groups.
+`cmake --build build --target test-vectorkernels` builds and runs all groups
+with the configured test job limit. Individual `test-vectorkernels_<group>`
+targets run one group. After building, run just the vector kernel groups with:
+
+```console
+$ ctest --test-dir build -L vectorkernels -j 16 --output-on-failure
+```
+
+The former single `vectorkernels` executable is replaced by these groups.
+
+## FFT tests
+
+The `vectorkernels_fft` app includes single-channel radix-2 DIT and DIF FFTs,
+normalized inverse transforms, bit reversal, and FFT-based linear convolution.
+FFT tests cover 2 through 2,048 complex samples; convolution tests cover input
+lengths 1 through 512. All targets run with aligned DRAM buffers, and Hexagon
+also runs with VTCM buffers. References use scalar double precision FFTs,
+cross-checked against an independent double precision DFT for small
+transforms. Each kernel's normwise error is bounded by its expected
+precision, which grows with the transform size because the ported kernels
+generate twiddles incrementally in FP32. Each case seeds its own inputs, so
+they do not depend on test order or the C library. A separate DIF variant
+with precomputed memory-stage twiddles is checked at the FP32 error floor.
+The known Hexagon v81 IEEE-mode FP32 arithmetic failure also affects FFTs;
+those cases execute as XFAILs, while integer bit reversal must still pass.
 
 ## Note on switching between cmake configurations
 
@@ -212,13 +269,14 @@ $ adb push $HEXAGON_SDK_ROOT/libs/run_main_on_hexagon/ship/hexagon_toolv88_v79/l
 The step above can be done once.
 Note that file names are version-dependent and may need to be adjusted depending on the device and SDK versions.
 
-To run tests e.g. in `regressions`, we can do the following:
+To run a regression group, for example `regressions_arithmetic`, we can do
+the following:
 
 ```console
-$ adb push libregressions.so /data/local/tmp
+$ adb push libregressions_arithmetic.so /data/local/tmp
 $ adb shell
 kalama:/ # cd /data/local/tmp
-kalama:/ # DSP_LIBRARY_PATH=/data/local/tmp ./run_main_on_hexagon 3 libregressions.so unsigned_pd=1 -o result.txt
+kalama:/ # DSP_LIBRARY_PATH=/data/local/tmp ./run_main_on_hexagon 3 libregressions_arithmetic.so unsigned_pd=1 -o result.txt
 kalama:/ # cat result.txt
 ```
 
